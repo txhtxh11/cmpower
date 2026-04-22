@@ -1,0 +1,372 @@
+substitutions:
+  node_name: "powerboard-homekit"
+  # 设备对外显示的友好名称
+  node_name_friendly: "🔌 智能插排 (Smart Power Strip)"
+  node_project_name: "CMCC.CMPOWER-W1"
+  node_project_version: "v6.0.1"
+  node_build_min_version: "2026.1.0"
+  device_mid: "ESP32_POWERBOARD_HOMEKIT"
+
+  # GPIO 物理引脚定义
+  button_pin: GPIO4 
+  relay_master_pin: GPIO0
+  relay_slave_pin: GPIO12
+  relay_enable_pin: GPIO15
+  led_blue_pin: GPIO16
+  led_red_pin: GPIO14
+  led_white_pin: GPIO5
+safe_mode:
+  reboot_timeout: 5min
+http_request:
+  verify_ssl: false
+esphome:
+  name: ${node_name}
+  friendly_name: ${node_name_friendly}
+  project:
+    name: ${node_project_name}
+    version: ${node_project_version}
+  name_add_mac_suffix: true
+  min_version: ${node_build_min_version}
+  
+  platformio_options:
+    board_build.f_cpu: 160000000L
+    board_build.ldscript: eagle.flash.4m1m.ld
+    build_flags:
+      - "-D HOMEKIT_LOG_LEVEL=0 -D ARDUINO_HOMEKIT_LOWROM"
+  # 新增：开机执行WiFi物理模式配置，强制11G，并设置设备名称
+  on_boot:
+    priority: 800 # 高优先级，确保WiFi初始化前执行
+    then:
+      - lambda: |-
+          WiFi.setPhyMode(WIFI_PHY_MODE_11G); // 强制ESP8266使用802.11G模式
+          
+esp8266:
+  board: esp12e
+  restore_from_flash: true
+
+preferences:
+  flash_write_interval: 5min
+
+# 外部组件：SY7T609计量芯片驱动
+external_components:
+  - source:
+      type: local
+      path: .
+    components: [homekit, sy7t609]
+
+wifi:
+  min_auth_mode: WPA
+  #use_address: 192.168.50.66
+  #fast_connect: true
+  reboot_timeout: 0s
+  # 连接成功后亮蓝灯
+  on_connect:
+    - light.turn_on: id_led_blue
+  on_disconnect:
+    - light.turn_off: id_led_blue
+  ap:
+    ssid: "CMPOWER-W1"
+    password: ""
+    
+captive_portal:
+web_server:
+  port: 80
+  version: 1
+#logger:
+# ------------------------------------------------
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+#  - platform: web_server
+time:
+  - platform: homeassistant
+    id: id_homeassistant_time
+    timezone: "Asia/Shanghai"
+
+uart:
+  tx_pin: GPIO1
+  rx_pin: GPIO3
+  baud_rate: 9600
+  # sy7t609 will try stored baud first, then 9600/4800/19200/38400/115200/2400.
+
+# ------------------------------------------------
+# 全局变量：用于断电记忆累计电量和设备标识
+# ------------------------------------------------
+globals:
+  - id: id_energy_counter_persist
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+  - id: id_energy_counter_lastvalue
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+text_sensor:
+  - platform: wifi_info
+    ssid:
+      name: SSID 名称
+      icon: "mdi:signal-variant"
+    ip_address:
+      name: IP 地址
+      icon: "mdi:ip-network"
+    mac_address:
+      name: Mac 地址
+      icon: "mdi:wifi-marker"
+  - platform: template
+    name: "HomeKit 配对码"
+    id: id_homekit_setup_code
+    icon: "mdi:qrcode"
+    update_interval: 1h
+    lambda: |-
+      std::string code = id(my_hk)->get_setup_code();
+      if (code.empty()) {
+        return {"等待生成"};
+      }
+      return {code};
+# ------------------------------------------------
+# 硬件输出定义
+# ------------------------------------------------
+output:
+  - platform: gpio
+    id: id_pin_trigger_relay_enable
+    pin:
+      number: ${relay_enable_pin}
+      inverted: true
+
+  - platform: gpio
+    id: id_pin_relay_master
+    pin:
+      number: ${relay_master_pin}
+      inverted: true
+
+  - platform: gpio
+    id: id_pin_relay_slave
+    pin:
+      number: ${relay_slave_pin}
+      inverted: true
+
+  - platform: esp8266_pwm
+    id: id_pin_led_white
+    pin:
+      number: ${led_white_pin}
+      inverted: true
+
+  - platform: esp8266_pwm
+    id: id_pin_led_blue
+    pin:
+      number: ${led_blue_pin}
+      inverted: true
+
+  - platform: esp8266_pwm
+    id: id_pin_led_red
+    pin:
+      number: ${led_red_pin}
+      inverted: true
+
+# ------------------------------------------------
+# 灯光控制
+# ------------------------------------------------
+light:
+  - platform: monochromatic
+    name: "⚪ 分路指示灯 (Slave Indicator)"
+    id: id_led_white
+    output: id_pin_led_white
+    internal: true
+
+  - platform: monochromatic
+    name: "🔵 WIFI状态灯 (WiFi Status)"
+    id: id_led_blue
+    output: id_pin_led_blue
+    internal: true
+
+  - platform: status_led
+    name: "🔴 系统状态灯 (System Status)"
+    id: id_led_red
+    output: id_pin_led_red
+    internal: true
+
+# ------------------------------------------------
+# 按钮与自动化
+# ------------------------------------------------
+button:
+  - platform: template
+    name: "重置 HomeKit"
+    on_press:
+      - homekit.reset_storage: my_hk
+  - platform: output
+    id: id_trigger_relay_enable
+    output: id_pin_trigger_relay_enable
+    duration: 10ms
+    internal: true
+
+  - platform: template
+    name: "♻️ 重置累计电量 (Reset Energy)"
+    entity_category: config
+    on_press:
+      then:
+        - globals.set:
+            id: id_energy_counter_persist
+            value: '0.0'
+        - sy7t609.reset_energy: id_sensor_sy7t609
+
+# ------------------------------------------------
+# 开关与逻辑
+# ------------------------------------------------
+switch:
+  # 主继电器逻辑开关
+  - platform: template
+    name: "⚡总开关 Master Switch"
+    id: id_relay_master_logic
+    lambda: "return id(id_relay_master_real).state;"
+    turn_on_action:
+      - switch.turn_on: id_relay_master_real
+    turn_off_action:
+      - switch.turn_off: id_relay_master_real
+
+  # 从继电器逻辑开关（开启从开关会自动开启主开关）
+  - platform: template
+    name: "🔌分路开关 Slave Switch"
+    id: id_relay_slave_logic
+    lambda: "return id(id_relay_master_real).state && id(id_relay_slave_real).state;"
+    turn_on_action:
+      - switch.turn_on: id_relay_slave_real
+      - switch.turn_on: id_relay_master_real
+    turn_off_action:
+      - switch.turn_off: id_relay_slave_real
+
+  # 物理继电器底层控制
+  - platform: output
+    id: id_relay_master_real
+    output: id_pin_relay_master
+    internal: true
+    on_turn_on:
+      - button.press: id_trigger_relay_enable
+      - lambda: "if(id(id_relay_slave_real).state) id(id_led_white).turn_on().perform();"
+    on_turn_off:
+      - button.press: id_trigger_relay_enable
+      - lambda: "id(id_led_white).turn_off().perform();"
+
+  - platform: output
+    id: id_relay_slave_real
+    output: id_pin_relay_slave
+    internal: true
+    on_turn_on:
+      - button.press: id_trigger_relay_enable
+      - lambda: "if(id(id_relay_master_real).state) id(id_led_white).turn_on().perform();"
+    on_turn_off:
+      - button.press: id_trigger_relay_enable
+      - lambda: "id(id_led_white).turn_off().perform();"
+
+  - platform: restart
+    name: "🔄 系统重启 (System Restart)"
+  
+  - platform: factory_reset
+    name: "🏭 恢复出厂设置 (Factory Reset)"
+    id: id_factoryreset
+
+# ------------------------------------------------
+# 传感器与计量
+# ------------------------------------------------
+sensor:
+  - platform: sy7t609
+    id: id_sensor_sy7t609
+    voltage:
+      name: "⚡ 电压 (Voltage)"
+    current:
+      name: "🌊 电流 (Current)"
+    power:
+      name: "💡 功率 (Power)"
+      id: id_sensor_power
+    energy:
+      id: id_sensor_energy
+      internal: true
+    update_interval: 3s
+    reactive_power:
+      name: "👻 无功功率 (Reactive Power)"
+      id: id_sensor_reactive_power
+    power_factor:
+      name: "📊 功率因数 (Power Factor)"
+      id: id_sensor_power_factor
+    frequency:
+      name: "📈 频率 (Frequency)"
+      id: id_sensor_frequency
+    chip_temperature:
+      name: "🌡️ 芯片温度 (Chip Temp)"
+  - platform: total_daily_energy
+    name: "📅 今日用电量 (Daily Energy)"
+    id: id_total_daily_energy_median
+    power_id: id_sensor_power
+    accuracy_decimals: 3      # 建议改3位
+    unit_of_measurement: kWh  # 修改单位
+    restore: true
+    filters:
+      - multiply: 0.001       # 核心：乘以0.001
+
+  # 电量持久化逻辑
+  - platform: copy
+    name: "🔋 累计电量 (Total Energy)"
+    id: id_sensor_energy_counter_persist
+    source_id: id_sensor_energy
+    accuracy_decimals: 3      # 建议改3位
+    unit_of_measurement: kWh  # 修改单位
+    filters:
+      - lambda: |-
+          if(x < id(id_energy_counter_persist)) {
+            float delta = x - id(id_energy_counter_lastvalue);
+            id(id_energy_counter_persist) += delta;
+            id(id_energy_counter_lastvalue) = x;
+          } else {
+            id(id_energy_counter_persist) = x;
+          }
+          return id(id_energy_counter_persist);
+      - multiply: 0.001       # 核心：计算完后乘以0.001输出
+
+# ------------------------------------------------
+# 二进制传感器与按键逻辑
+# ------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: id_power_key
+    internal: true
+    pin:
+      number: ${button_pin}
+      inverted: true
+      mode: INPUT_PULLUP
+    on_multi_click:
+      # 单击翻转分路开关
+      - timing:
+          - ON for at most 0.3s
+          - OFF for at least 0.2s
+        then:
+          - switch.toggle: id_relay_slave_logic
+      # 双击翻转总开关
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.5s
+          - ON for at most 0.5s
+          - OFF for at least 0.2s
+        then:
+          - switch.toggle: id_relay_master_logic
+      # 长按5s恢复出厂
+      - timing:
+          - ON for at least 5s
+        then:
+          - switch.turn_on: id_factoryreset
+
+
+# ------------------------------------------------
+
+##############################################
+###苹果配件支
+
+homekit:
+  id: my_hk
+  # 可选：取消注释后使用固定配对码；保持注释则每次清空配对后自动生成随机码
+  setup_code: "111-11-111"
+  # 可选：取消注释后优先使用你自定义的 Bark 地址；不写则使用组件内置默认 Bark
+  # bark_url: "https://api.day.app/你的BarkKey"
+  switches:
+    - id_relay_slave_logic
+    - id_relay_master_logic
