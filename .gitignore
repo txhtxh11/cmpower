@@ -1,5 +1,6 @@
-push.sh
-push_to_github.sh
-push_token.sh
-simple_push.sh
-PUSH_GUIDE.md
+push.sh push_to_github.sh push_token.sh simple_push.sh PUSH_GUIDE.md 
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
